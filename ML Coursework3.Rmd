@@ -1,0 +1,1203 @@
+---
+title: "ST3189 Coursework"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+date: "2024-02-28"
+---
+# Libraries
+```{r}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(mlbench)
+library(factoextra)
+library(cluster)
+library(dendextend)
+library(glmnet)
+library(car)
+library(MASS)
+library(caTools)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(class)
+library(e1071)
+library(naivebayes)
+library(xgboost)
+```
+
+
+# Data Exploration
+
+Dataset taken from:  https://www.kaggle.com/datasets/thedevastator/spotify-tracks-genre-dataset 
+
+This dataset will be used for all three tasks (Unsupervised Learning, Regression and Classification). The aim of this coursework is to connect insights drawn from each task together to formulate a comprehensive story about different areas of the dataset.
+
+## setwd and data preparation
+```{r}
+setwd("/Users/caleb/Desktop/School/Year 2/ST3189 Machine Learning/Coursework/Coursework")
+
+data <- fread("train.csv", stringsAsFactors = T)
+
+head(data)
+summary(data)
+
+# rename first column
+colnames(data)[1] <- "index"
+
+# rename track_genre for convenience
+colnames(data)[colnames(data) == "track_genre"] <- "genre"
+
+# convert explicit column to numeric
+data$explicit <- as.factor(data$explicit*1)
+
+# check data for NAs
+sum(is.na(data))
+
+# use boxplot to check for outliers in 'popularity' since this will be the dependent variable for regression
+boxplot(data$popularity, horizontal = T)
+```
+
+Since the data has been pre-wrangled, we can dive straight into basic exploration of different variables to derive better understanding of the data. Our dataset consists of 114,000 entries with no missing(NA) values, with 1,000 entries per genre.  
+
+We check for the outlier and see it is just the highest value for the “popularity” variable. 
+
+## Basic data visualisation with correlation matrix
+```{r}
+# select relevant variables
+continuous_data <- data[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "time_signature")]
+
+# create sample
+set.seed(2)
+sample_size <- 5000
+sample_data <- sample_n(continuous_data, size = sample_size)
+
+# scatterplot matrix to visualise data
+pairs(~ . , panel=panel.smooth, data = sample_data, main = "Scatterplot Matrix of Spotify Data")
+
+# Calculate the correlation matrix
+correlation_matrix <- cor(sample_data)
+highlyCorrelated <- findCorrelation(correlation_matrix, cutoff=0.5)
+
+# Convert correlation matrix to long format for ggplot
+correlation_long <- melt(correlation_matrix, na.rm = TRUE)
+
+# Plot the heatmap using ggplot with annotations
+ggplot(correlation_long, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(value, 2)), color = "black", size = 3) +  # Add text labels
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab",
+                       name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 10, hjust = 1)) +
+  coord_fixed() +
+  labs(title = "Correlation Heatmap of Spotify Genres Data",
+       x = "Variables",
+       y = "Variables")
+
+print(highlyCorrelated)
+```
+We found that the strongest positive correlation is between 'loudness' and 'energy', and the biggest negative correlation is between 'acousticness' and 'energy'. 
+
+# Unsupervised Learning
+
+We aim to use Unsupervised Learning to create a music recommendation system, which recommends similar music to listeners based on what track they are listening to. Since we want to recommend similar music to listeners, we only use music attributes and exclude features such as 'popularity' and 'genre' that does not impact how a track sounds.
+
+```{r}
+# Use relevant variables only 
+new_data <- data[, c("duration_ms", "danceability", "loudness", "energy", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo")]
+```
+
+## PCA
+
+### Data Preparation and Perform PCA
+```{r}
+# Standardize the data 
+data_std <- scale(new_data)
+
+# Perform PCA
+data_PC <- prcomp(data_std)
+data_PC$rotation
+summary(data_PC)
+
+# Plot cumulative proportion of variance explained
+plot(summary(data_PC)$importance[2,], type = "b", xlab = "Principal Component", ylab = "Cumulative Proportion of Variance", main = "Scree Plot")
+
+# PC1 vs PC2 biplot
+fviz_pca_var(data_PC, col.var = "black")
+
+# Extract the scores for the first 4 components
+data_scores <- as.data.frame(data_PC$x[, 1:4])
+
+# Check the structure of the new data frame
+str(data_scores)
+```
+
+The scree plot shows that the first 3 PCs each contribute to over 10% of the variance explaine and PCA revealed that we need to include the first 4 principal components capture >65% of the variance.
+
+### Explore Groups created by PCA
+```{r}
+# PC1
+# PC1 Group 1
+high_loudness_energy <- data[data$loudness > 0.5 &
+                             data$energy > 0.5 &
+                             data$instrumentalness < 0.3 &
+                             data$acousticness < 0.3,
+                             c("track_name", "artists", "duration_ms", "tempo","genre")]
+print("PC1 Group 1")
+summary(high_loudness_energy$genre)
+
+# PC1 Group 2
+high_instrumentalness_acousticness <- data[data$instrumentalness > 0.7 &
+                                           data$acousticness > 0.7,
+                                           c("track_name", "artists", "duration_ms", "tempo","genre")]
+print("PC1 Group 2")
+summary(high_instrumentalness_acousticness$genre)
+
+# PC2
+# PC2 Group 1
+high_danceability_valence_acousticness <- data[data$danceability > 0.7 &
+                                               data$valence > 0.7 &
+                                               data$acousticness > 0.7,
+                                               c("track_name", "artists", "duration_ms", "tempo","genre")]
+print("PC2 Group 1")
+summary(high_danceability_valence_acousticness$genre)
+
+# PC2 Group 2
+high_instrumentalness_energy <- data[data$instrumentalness > 0.7 &
+                              data$energy > 0.7,
+                              c("track_name", "artists", "duration_ms", "tempo","genre")]
+print("PC2 Group 2")
+summary(high_instrumentalness_energy$genre)
+
+# PC3
+# PC3 Group 1
+low_liveness_speechiness <- data[data$liveness < 0.3 &
+                                 data$speechiness < 0.3,
+                                 c("track_name", "artists", "duration_ms", "tempo","genre")]
+print("PC3 Group 1")
+summary(low_liveness_speechiness$genre)
+
+# PC4
+# PC4 Group 1
+short_low_dance_high_tempo <- data[data$duration_ms < 180000 &   
+                                   data$danceability < 0.3 &   
+                                   data$tempo > 100,           
+                                   c("track_name", "artists", "duration_ms", "tempo","genre")]
+print("PC4 Group 1")
+summary(short_low_dance_high_tempo$genre)
+
+# PC4 Group 2
+long_high_dance_low_tempo <- data[data$duration_ms > 180000 &   
+                                   data$danceability > 0.7 &   
+                                   data$tempo < 100,           
+                                   c("track_name", "artists", "duration_ms", "tempo","genre")]
+print("PC4 Group 2")
+summary(long_high_dance_low_tempo$genre)
+```
+From the result we can see:
+In PC1, tracks with a high value in PC1 have higher values of loudness and energy while those with lower values in PC1 have high values in acousticness and instrumentalness.
+2 Main groups:
+- Songs high in loudness/energy such as Electronic Music score highly
+- Songs high in instrumentalness/acousticness such as Classical Music score lowly
+
+In PC2, tracks higher values of danceability, acousticness and valence score highly on PC2 while tracks with high values of instrumentalness score low on PC2
+2 Main Groups
+- Songs high in danceability/valence/acousticness such as Children Music
+- Songs high in instrumentalness/energy such as Techno music
+
+In PC3, strong negative values of speechiness and liveness, with no other strong values, but some positive values in danceability
+1 Main Group:
+- Songs that have no lyrics such as Ambient/Study/Electronic Music
+
+In PC4, high negative values for duration/danceability but high positive values for tempo suggests tracks with high PC4 scores are short and fast paced. 
+Main Groups:
+- Songs that are long in duration and high in danceability but low in Tempo such as World/Traditional Music
+- Songs that are short in duration, low in danceability but have high tempo such as Metal Music
+
+## K-Means Clustering
+
+### Determine K using PCA data
+```{r}
+# Create a subset of data for clustering (5000 random rows)
+set.seed(123)
+PC_data_sample <- data_scores[sample(nrow(data_scores), 5000), ]
+
+#Use Elbow method to determine k
+
+fviz_nbclust(PC_data_sample, kmeans, method = "wss") +
+  labs(subtitle = "Elbow method (PCA Data)")
+
+# No clear Elbow point on the Elbow curve, use Silhouette method 
+
+# Silhouette method
+fviz_nbclust(PC_data_sample, kmeans, method = "silhouette")+
+  labs(subtitle = "Silhouette method (PCA Data)")
+
+# Silhouette method indicates 2 clusters but that is not ideal for our music recommendation system
+```
+Both Elbow and Silhouette method suggest K=2, which is not ideal for a music recommendation system. 
+
+### Determine K using original data
+```{r}
+# Create a subset of data for clustering (5000 random rows)
+set.seed(123)
+data_sample <- data_std[sample(nrow(data_std), 5000), ]
+
+#Use Elbow method to determine k
+
+fviz_nbclust(data_sample, kmeans, method = "wss") +
+  labs(subtitle = "Elbow method (Original Data)")
+
+# No clear Elbow point on the Elbow curve, use Silhouette method 
+
+# Silhouette method
+fviz_nbclust(data_sample, kmeans, method = "silhouette")+
+  labs(subtitle = "Silhouette method (Original Data)")
+
+# Silhouette method indicates 2 clusters but that is not ideal for our music recommendation system
+```
+
+Same result with original data
+
+Instead, we use the number of groups we identified earlier from the first 4 PC; k = 7
+
+### Perform K-Means with PCA data
+```{r}
+set.seed(123)
+# K-means clustering with 7 clusters, based on the 7 groups identified earlier
+PC_kmeans_result <- kmeans(PC_data_sample, centers = 7)
+
+# Access cluster assignments
+PC_cluster_assignments <- PC_kmeans_result$cluster
+
+# Create a copy
+PC_sample_data_clusters  <- data.frame(PC_data_sample) 
+
+# Add the cluster assignments as a new column
+PC_sample_data_clusters$cluster <- PC_cluster_assignments
+
+# View the cluster centers
+PC_kmeans_result$centers
+
+# View the distribution of data points in each cluster
+table(PC_sample_data_clusters$cluster)
+```
+### K-Means Goodness of Fit Test using Silhouette Score with PCA data
+Silhouette score measure how well each data point fits into its assigned cluster
+[higher = better defined clusters]
+```{r}
+# Compute silhouette score
+PC_kmeans_silhouette_score <- silhouette(PC_kmeans_result$cluster, dist(PC_data_sample))
+
+# Mean silhouette score
+PC_kmeans_mean_silhouette <- mean(PC_kmeans_silhouette_score[, 3])
+
+# View the mean silhouette score
+print(paste0("Mean Silhouette Score (PCA Data): ", PC_kmeans_mean_silhouette))
+```
+
+The mean silhouette score of our Kmeans clustering is 0.2610286 which indicates that the clustering is reasonable for our use case, since the Silhouette Score is > 0. 
+
+(Reference: https://vitalflux.com/kmeans-silhouette-score-explained-with-python-example/_)
+
+Keeping in mind that individuals often like multiple genres of music, a very high silhouette score would not be optimal for our music recommendation system as that would mean songs recommended to listeners would be too similar (same genre).
+
+### Perform K-Means with original dataset
+```{r}
+set.seed(123)
+# K-means clustering with 7 clusters, based on the 7 groups identified earlier
+kmeans_result <- kmeans(data_sample, centers = 7)
+
+# Access cluster assignments
+cluster_assignments <- kmeans_result$cluster
+
+# Create a copy
+sample_data_clusters  <- data.frame(data_sample) 
+
+# Add the cluster assignments as a new column
+sample_data_clusters$cluster <- cluster_assignments
+
+# View the cluster centers
+kmeans_result$centers
+
+# View the distribution of data points in each cluster
+table(sample_data_clusters$cluster)
+```
+
+### K-Means Goodness of Fit Test using Silhouette Score with original data
+Silhouette score measure how well each data point fits into its assigned cluster
+[higher = better defined clusters]
+```{r}
+# Compute silhouette score
+kmeans_silhouette_score <- silhouette(kmeans_result$cluster, dist(data_sample))
+
+# Mean silhouette score
+kmeans_mean_silhouette <- mean(kmeans_silhouette_score[, 3])
+
+# View the mean silhouette score
+print(paste0("Mean Silhouette Score (Original Data): ", kmeans_mean_silhouette))
+```
+The mean silhouette score of our Kmeans clustering is 0.1666059 which indicates that the clustering is reasonable, since the Silhouette Score is > 0.
+
+Keeping in mind that individuals often like multiple genres of music, a very high silhouette score would not be optimal for our music recommendation system as that would mean songs recommended to listeners would be too similar.
+
+Our PCA has effectively improved the Goodness of fit for our Kmeans clustering since the mean silhouette score is higher. Moving forward, we just use PCA for Hierarchical Clustering
+```{r}
+sil_scores <- silhouette(PC_kmeans_result$cluster, dist(PC_data_sample))
+
+# Plot
+fviz_silhouette(sil_scores) + theme_minimal() + labs(title = "Silhouette Plot for K-Means Clusters")
+```
+
+
+## Hierarchical Clustering
+
+### With PCA Data
+```{r}
+# Calculate the distance matrix
+dist_matrix <- dist(PC_data_sample)
+
+# Perform hierarchical clustering using Complete linkage
+hc_complete <- hclust(dist_matrix, method = "complete")
+
+# Perform hierarchical clustering using Average linkage
+hc_average <- hclust(dist_matrix, method = "average")
+
+# following the same logic as K-means
+k <- 7
+
+# Cut the dendrograms to form clusters
+clusters_complete <- cutree(hc_complete, k = k)
+clusters_average <- cutree(hc_average, k = k)
+
+colors <- c("red", "blue", "green", "purple", "orange", "cyan", "brown") 
+
+# Create the dendrogram with 'Complete' linkage clusters
+dend_complete <- as.dendrogram(hc_complete)
+dend_complete <- color_branches(dend_complete, k = k, col = colors)
+plot(dend_complete, main = "PCA: Dendrogram (Complete Linkage)")
+
+# Create the dendrogram with 'Average' linkage clusters
+dend_average <- as.dendrogram(hc_average)
+dend_average <- color_branches(dend_average, k = k, col = colors)
+plot(dend_average, main = "PCA: Dendrogram (Average Linkage)")
+```
+
+### Hierarchical Clustering Goodness of Fit Test with PCA Data
+```{r}
+# Silhouette scores
+sil_score_complete <- silhouette(clusters_complete, dist_matrix)
+sil_score_average <- silhouette(clusters_average, dist_matrix)
+
+# Calculating mean silhouette scores for both methods
+mean_sil_score_complete <- mean(sil_score_complete[, 3])
+mean_sil_score_average <- mean(sil_score_average[, 3])
+
+# Display mean silhouette scores
+print(paste("Mean Silhouette Score for Complete Linkage (PCA Data): ", mean_sil_score_complete))
+print(paste("Mean Silhouette Score for Average Linkage (PCA Data): ", mean_sil_score_average))
+```
+
+Average linkage has a significantly better Mean Silhouette Score, but for our case, we would actually prefer the Complete Linkage approach since we want to recommend music to listeners across genres. Based on the Dendrogram, Average linkage has clustered a large portion of tracks in red, compared to Complete Linkage which has a much better spread of clusters. 
+
+### Most Popular Genres
+```{r}
+# Calculate average popularity for each genre
+genre_popularity <- data %>%
+  group_by(genre) %>%
+  summarise(avg_popularity = mean(popularity, na.rm = TRUE)) %>%
+  arrange(desc(avg_popularity))
+
+# Top 10 most popular genres
+top_genres <- head(genre_popularity, 10)
+print(top_genres)
+
+# Visualize
+ggplot(top_genres, aes(x = reorder(genre, avg_popularity), y = avg_popularity)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Top 10 Most Popular Genres on Spotify",
+       x = "Genre",
+       y = "Average Popularity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+# Regression Tasks
+
+## Linear Regression
+
+### Linear Regression Data Prep
+```{r}
+regression_data <- data[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "genre" )]
+
+features <- c("duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo") 
+
+# Standardise data
+std_regression_data <- copy(regression_data)
+std_regression_data[, (features) := lapply(.SD, scale), .SDcols = features] 
+
+# One-hot encoding of the 'genre' feature
+std_regression_data <- cbind(regression_data, model.matrix(~ 0 + genre, data = regression_data)) 
+std_regression_data <- std_regression_data[,-c("genre")]
+
+# Train and test split
+set.seed(123)  
+train <- sample.split(Y = std_regression_data$popularity, SplitRatio = 0.7)
+train_data <- subset(std_regression_data, train == T)
+test_data <- subset(std_regression_data, train == F)  
+```
+
+### Fit LM model
+```{r}
+# Fit the initial model with all features using the same train data as ridge model
+lm_model <- lm(popularity ~ ., data = train_data)
+summary(lm_model)
+```
+There are many features that are not statistically significant
+
+### Evaluate RMSE of LM Model
+```{r}
+# Check RMSE
+rmse_train_lm  <- sqrt(mean((train_data$popularity - predict(lm_model))^2))
+rmse_test_lm <- sqrt(mean((test_data$popularity - predict(lm_model, newdata = test_data))^2))
+
+print(paste0("RMSE Train Set (Linear Regreesion): ", rmse_train_lm))
+print(paste0("RMSE Test Set (Linear Regreesion): ", rmse_test_lm))
+
+# R-Squared
+r_squared_train <- cor(train_data$popularity, predict(lm_model))^2
+r_squared_test <- cor(test_data$popularity, predict(lm_model, newdata = test_data))^2
+print(paste0("R-squared Train Set (Linear Regression): ", r_squared_train)) 
+print(paste0("R-squared Test Set (Linear Regression): ", r_squared_test)) 
+
+# Plot
+par(mfrow = c(1,1))
+plot(lm_model)
+```
+The RMSE is high and the R-Squared is low. We try to improve the model performance through regularisation
+
+### Ridge Regression
+```{r}
+# Remove 'popularity' column from features
+train_features_ridge <- as.matrix(train_data[,-1]) 
+test_features_ridge <- as.matrix(test_data[,-1])
+
+# Target variable remains the same
+train_target_ridge <- train_data$popularity
+test_target_ridge <- test_data$popularity
+
+# Ridge Regression 
+ridge_model <- cv.glmnet(x = train_features_ridge, y = train_target_ridge, alpha = 0)
+coef(ridge_model, s = ridge_model$lambda.min) # Examine coefficients
+
+# Predict 
+ridge_train_predictions <- predict(ridge_model, s = ridge_model$lambda.min, newx = train_features_ridge)
+ridge_test_predictions <- predict(ridge_model, s = ridge_model$lambda.min, newx = test_features_ridge)
+
+# Evaluation metrics  
+ridge_train_mse <- mean((train_target_ridge - ridge_train_predictions)^2)
+ridge_test_mse <- mean((test_target_ridge - ridge_test_predictions)^2)
+ridge_train_rmse <- sqrt(ridge_train_mse)
+ridge_test_rmse <- sqrt(ridge_test_mse)
+ridge_train_r2 <- cor(train_target_ridge, ridge_train_predictions)^2 
+ridge_test_r2 <- cor(test_target_ridge, ridge_test_predictions)^2 
+
+print(paste0("Train RMSE (Ridge): ", ridge_train_rmse))
+print(paste0("Test RMSE (Ridge): ", ridge_test_rmse))
+print(paste0("Train Set R-squared (Ridge): ", ridge_train_r2))
+print(paste0("Test Set R-squared (Ridge): ", ridge_test_r2))
+
+par(mfrow = c(1,1))
+plot(ridge_model)
+par(mfrow = c(1,1))
+```
+
+The RMSE is relatively high, and R-Squared is low. This model does not do well in predicting popularity
+
+### Predict on a Per-Feature basis
+```{r}
+regression_data <- data[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo")]
+
+features <- c("duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo") 
+
+# Standardise data
+std_regression_data <- copy(regression_data)
+std_regression_data[, (features) := lapply(.SD, scale), .SDcols = features] 
+# Train and test split
+set.seed(123)  
+train <- sample.split(Y = std_regression_data$popularity, SplitRatio = 0.7)
+train_data <- subset(std_regression_data, train == T)
+test_data <- subset(std_regression_data, train == F)  
+
+# Create a table with R-Squared and RMSE Values per feature
+features <- names(train_data)[-which(names(train_data) == "popularity")] 
+results <- data.frame(Feature = character(), R_squared = numeric(), RMSE = numeric())
+
+for (feature in features) {
+  formula_str <- as.formula(paste("popularity ~ `", feature, "`", sep = ""))
+  simple_model <- lm(formula = formula_str, data = train_data)
+
+  r2 <- summary(simple_model)$r.squared
+  rmse <- sqrt(mean(simple_model$residuals^2))
+
+  results <- rbind(results, data.frame(Feature = feature, R_squared = r2, RMSE = rmse))
+}
+results
+
+# Analyse LM of top feature based on Lowest RMSE
+best_feature_rmse <- results[which.max(results$RMSE), "Feature"]  # Get feature with highest R-squared
+
+formula_str <- as.formula(paste("popularity ~ `", best_feature_rmse, "`", sep = "")) 
+model_rmse <- lm(formula = formula_str, data = train_data)
+
+# Scatterplot for RMSE
+ggplot(std_regression_data, aes(x = get(best_feature_rmse), y = popularity)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) +  
+  labs(title = paste0("Popularity vs. ", best_feature_rmse))
+
+# Analyse LM of top feature based on best R-Squared
+best_feature_r2 <- results[which.max(results$R_squared), "Feature"]  # Get feature with highest R-squared
+
+formula_str_r2 <- as.formula(paste("popularity ~ `", best_feature_r2, "`", sep = "")) 
+model_r2 <- lm(formula = formula_str_r2, data = std_regression_data)
+
+# Scatterplot for R^2
+ggplot(std_regression_data, aes(x = get(best_feature_r2), y = popularity)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = FALSE) +  
+  labs(title = paste0("Popularity vs. ", best_feature_r2))
+```
+Even on a per-feature basis, there is no feature that predicts popularity well.
+
+## Recreate Data for other regression tasks to exclude the large number of dummy variables created for ridge/linear models
+
+```{r}
+regression_data <- data[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "explicit","genre")]
+
+features <- c("duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo") 
+
+# Standardise data
+std_regression_data <- copy(regression_data)
+std_regression_data[, (features) := lapply(.SD, scale), .SDcols = features] 
+
+set.seed(123)
+
+# Split the data into training (70%) and testing (30%) sets
+train <- sample.split(Y = std_regression_data$popularity, SplitRatio = 0.7)
+train_data <- subset(std_regression_data, train == T)
+test_data <- subset(std_regression_data, train == F) 
+```
+
+## CART Regression 
+
+### Fit the CART model
+```{r}
+# Fit the CART regression model
+m.cart <- rpart(popularity ~ ., data = train_data, method = 'anova', control = rpart.control(minsplit = 2, cp = 0))
+
+# Plot the cross-validated error as a function of the complexity parameter (cp)
+plotcp(m.cart)
+```
+
+### Obtain the optimal CP value to prune the tree
+```{r}
+# Compute min CVerror + 1SE in maximal tree m.cart
+CVerror.cap <- m.cart$cptable[which.min(m.cart$cptable[,"xerror"]), "xerror"] + m.cart$cptable[which.min(m.cart$cptable[,"xerror"]), "xstd"]
+
+# Find the optimal CP region whose CV error is just below CVerror.cap in maximal tree m.cart
+i <- 1
+while (m.cart$cptable[i,"xerror"] > CVerror.cap) {
+  i <- i + 1
+}
+
+# Get geometric mean of the two identified CP values in the optimal region if optimal tree has at least one split
+cp.opt <- ifelse(i > 1, sqrt(m.cart$cptable[i, "CP"] * m.cart$cptable[i-1, "CP"]), 1)
+cp_table <- printcp(m.cart)
+
+# Prune the max tree using the optimal CP value
+m.cart2 <- prune(m.cart, cp = cp.opt)
+```
+
+### Predict and calculate RMSE for CART regression
+```{r}
+# Make predictions on the data
+train_predictions_cart <- predict(m.cart)
+test_predictions_cart <- predict(m.cart, newdata = test_data)
+
+# Calculate RMSE for CART model
+train_rmse_cart <- sqrt(mean((train_data$popularity - train_predictions_cart)^2))
+test_rmse_cart <- sqrt(mean((test_data$popularity - test_predictions_cart)^2))
+print(paste("Train RMSE for CART model:", train_rmse_cart))
+print(paste("Test RMSE for CART model:", test_rmse_cart))
+
+
+# Make predictions on the pruned tree (if used)
+if (exists("m.cart2")) {
+  train_predictions_cart2 <- predict(m.cart2)
+  train_rmse_cart2 <- sqrt(mean((train_data$popularity - train_predictions_cart2)^2))
+  print(paste("Train RMSE for pruned CART model:", train_rmse_cart2))
+}
+
+if (exists("m.cart2")) {
+  test_predictions_cart2 <- predict(m.cart2, newdata = test_data)
+  test_rmse_cart2 <- sqrt(mean((test_data$popularity - test_predictions_cart2)^2))
+  print(paste("Test RMSE for pruned CART model:", test_rmse_cart2))
+}
+
+# Calculate R-squared for CART model (training set)
+train_rsquared_cart <- cor(train_data$popularity, train_predictions_cart)^2
+print(paste("Train R-squared for CART model:", train_rsquared_cart))
+
+# Calculate R-squared for CART model (testing set)
+test_rsquared_cart <- cor(test_data$popularity, test_predictions_cart)^2
+print(paste("Test R-squared for CART model:", test_rsquared_cart))
+
+# Repeat for pruned tree (if used)
+if (exists("m.cart2")) {
+  # Calculate R-squared for pruned CART model (training set)
+  train_rsquared_cart2 <- cor(train_data$popularity, train_predictions_cart2)^2
+  print(paste("Train R-squared for pruned CART model:", train_rsquared_cart2))
+
+  # Calculate R-squared for pruned CART model (testing set)
+  test_rsquared_cart2 <- cor(test_data$popularity, test_predictions_cart2)^2
+  print(paste("Test R-squared for pruned CART model:", test_rsquared_cart2))
+}
+
+# Variable Importance
+print("Variable Importance:")
+print(round(100 * m.cart$variable.importance / sum(m.cart$variable.importance), 2))
+```
+Without pruning, the model is overfitted. After pruning, the model performs better with lower RMSE on the test set
+
+## Random Forest Regression
+
+Utilising the entire train data set will be computationally exhaustive and will likely take > 25min to train the model. Instead, we downsample the data for less expensive computation. Downsampling the data significantly reduces model training time. If I were to use the entire data set, this model would likely take >25minutes to train. Downsampling to 10% of the data saves a lot of time. Having tested the model with the entire data set, the difference in the end test set results is negligible. However, the RMSE for the train set differed greatly, suggesting that using the entire train set would overfit the model
+
+### Downsampling Data for RF
+```{r}
+# Desired number of samples per genre
+samples_per_genre <- 100
+
+# Downsampling the dataset
+reg_downsampled_data_100 <- train_data %>%
+  group_by(genre) %>%
+  sample_n(samples_per_genre) %>%
+  ungroup()
+
+# Remove "genre" since random forest cannot handle the large number of categories
+reg_downsampled_data_100 <- reg_downsampled_data_100[,c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "explicit")]
+```
+
+### Model Fitting and Predictions with downsampled RF
+```{r}
+# Fit model
+rf_regmodel_downsampled <- randomForest(popularity ~ ., data = reg_downsampled_data_100, ntree = 500, importance = TRUE)
+
+# Make predictions on the testing set
+train_predictions_rf <- predict(rf_regmodel_downsampled, newdata = train_data)
+test_predictions_rf <- predict(rf_regmodel_downsampled, newdata = test_data)
+
+# Calculate RMSE for Random Forest model
+train_rmse_rf <- sqrt(mean((train_data$popularity - train_predictions_rf)^2))
+print(paste("Train RMSE for Random Forest model:", train_rmse_rf))
+test_rmse_rf <- sqrt(mean((test_data$popularity - test_predictions_rf)^2))
+print(paste("Test RMSE for Random Forest model:", test_rmse_rf))
+
+# Calculate R-squared for pruned RF model (training set)
+train_rsquared_rf <- cor(train_data$popularity, train_predictions_rf)^2
+print(paste("Train R-squared RF model:", train_rsquared_rf))
+
+# Calculate R-squared for pruned RF model (testing set)
+test_rsquared_rf <- cor(test_data$popularity, test_predictions_rf)^2
+print(paste("Test R-squared RF model:", test_rsquared_rf))
+
+# Variable Importance
+print("Variable Importance:")
+print(round(importance(rf_regmodel_downsampled), 2))
+```
+
+# Classification Tasks
+
+With our classification tasks we aim to build a model to predict the genre for new tracks added
+
+## KNN Classification
+
+### KNN Data Preparation
+```{r}
+class_data <- data[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "genre", "explicit")]
+
+class_features <- c("popularity","duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo") 
+
+# Standardise data
+std_class_data <- copy(class_data)
+std_class_data[, (class_features) := lapply(.SD, scale), .SDcols = class_features] 
+
+# Train and test split
+set.seed(123)  
+train <- sample.split(Y = std_class_data$genre, SplitRatio = 0.7)
+train_data <- subset(std_class_data, train == T)
+test_data <- subset(std_class_data, train == F) 
+
+# KNN requires all features to be numeric
+train_data$genre <- as.numeric(train_data$genre)
+test_data$genre <- as.numeric(test_data$genre)
+```
+
+### KNN Model and Predictions
+``` {r}
+# Define the number of neighbors (k)
+k <- 5
+
+# Train the KNN model
+knn_model <- knn(train_data, test_data, train_data$genre, k)
+
+# Predict on test data
+knn_predictions <- as.factor(knn_model)
+
+# Evaluate the model
+confusion_matrix_knn <- table(test_data$genre, knn_predictions)
+
+# Calculate type 1 and type 2 errors
+type1_errors_knn <- rowSums(confusion_matrix_knn) - diag(confusion_matrix_knn)
+type2_errors_knn <- colSums(confusion_matrix_knn) - diag(confusion_matrix_knn)
+correct_predictions_knn <- diag(confusion_matrix_knn)
+
+# Create confusion table
+confusion_table_knn <- cbind(type1_errors_knn, type2_errors_knn, correct_predictions_knn)
+colnames(confusion_table_knn) <- c("Type 1 Errors", "Type 2 Errors", "Correct Predictions (KNN)")
+rownames(confusion_table_knn) <- rownames(confusion_matrix_knn)
+
+# Calculate accuracy
+accuracy_knn <- sum(correct_predictions_knn) / sum(confusion_matrix_knn) * 100
+
+# Print confusion table
+print("Confusion Table (KNN):")
+print(confusion_table_knn)
+
+# Print accuracy
+print(paste0("Accuracy (KNN): ", round(accuracy_knn, 2), "%"))
+```
+The model performs very well, with >95% accuracy. For classifying music, this score is sufficient due to the subjective nature of genre.
+
+### KNN Model Totals
+```{r}
+total_type1_errors <- sum(confusion_table_knn[, 1])
+total_type2_errors <- sum(confusion_table_knn[, 2])
+total_correct_predictions <- sum(confusion_table_knn[, 3])
+
+print(paste0("Total Type 1 Errors: ", total_type1_errors))
+print(paste0("Total Type 2 Errors: ", total_type2_errors))
+print(paste0("Total Correct Predictions: ", total_correct_predictions))
+```
+
+
+## Random Forest Classification
+
+### Random Forest Data Preparation
+```{r}
+class_data <- data[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "genre", "explicit")]
+
+class_features <- c("popularity","duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo") 
+
+# Standardise data (although RF is not very sensitive, so not needed)
+std_class_data <- copy(class_data)
+std_class_data[, (class_features) := lapply(.SD, scale), .SDcols = class_features] 
+
+# Train and test split
+set.seed(123)  
+train <- sample.split(Y = std_class_data$genre, SplitRatio = 0.7)
+train_data <- subset(std_class_data, train == T)
+test_data <- subset(std_class_data, train == F) 
+
+# We want our genre to be as factor instead of numeric for RF
+train_data$genre <- as.factor(train_data$genre)
+test_data$genre <- as.factor(test_data$genre)
+```
+
+### Random Forest Downsampled Data
+
+Following similar logic to our regression task using RF, we downsample to reduce computational load.
+
+```{r}
+# Desired number of samples per genre
+samples_per_genre <- 100
+
+# Downsampling the dataset
+set.seed(123)
+class_downsampled_data_100 <- train_data %>%
+  group_by(genre) %>%
+  sample_n(samples_per_genre) %>%
+  ungroup()
+```
+
+### Fitting RF Model and Predictions with downsampled data
+```{r}
+# Fit the Random Forest regression model with downsampled data
+rf_classmodel_downsampled <- randomForest(genre ~ ., data = class_downsampled_data_100, ntree = 500, importance = TRUE)
+
+# Predict on test data
+rf_class_predictions <- predict(rf_classmodel_downsampled, newdata = test_data)
+
+# Confusion matrix
+confusion_matrix_rf <- table(test_data$genre, rf_class_predictions)
+
+# Calculate type 1 and type 2 errors
+type1_errors_rf <- rowSums(confusion_matrix_rf) - diag(confusion_matrix_rf)
+type2_errors_rf <- colSums(confusion_matrix_rf) - diag(confusion_matrix_rf)
+correct_predictions_rf <- diag(confusion_matrix_rf)
+
+# Create confusion table
+confusion_table_rf <- cbind(type1_errors_rf, type2_errors_rf, correct_predictions_rf)
+colnames(confusion_table_rf) <- c("Type 1 Errors", "Type 2 Errors", "Correct Predictions")
+rownames(confusion_table_rf) <- rownames(confusion_matrix_rf)
+
+# Calculate accuracy
+accuracy_rf <- sum(correct_predictions_rf) / sum(confusion_matrix_rf) * 100
+
+# Print confusion table
+print("Confusion Table (Random Forest):")
+print(confusion_table_rf)
+
+# Print accuracy
+print(paste0("Accuracy (Random Forest): ", round(accuracy_rf, 2), "%"))
+```
+```{r}
+total_type1_errors_rf <- sum(confusion_table_rf[, 1])
+total_type2_errors_rf <- sum(confusion_table_rf[, 2])
+total_correct_predictions_rf <- sum(confusion_table_rf[, 3])
+
+print(paste0("Total Type 1 Errors: ", total_type1_errors_rf))
+print(paste0("Total Type 2 Errors: ", total_type2_errors_rf))
+print(paste0("Total Correct Predictions: ", total_correct_predictions_rf))
+```
+
+
+The accuracy is for the RF model is not ideal. Analyse the Feature Importance in the model
+
+### Analyse RF Feature Importance
+```{r}
+# Extract feature importance
+importance(rf_classmodel_downsampled)
+
+# Plot feature importance
+varImpPlot(rf_classmodel_downsampled)
+```
+
+"Explicit" is not important in determining genre. We remove it and run the model again
+
+### Remove features with low importance and run RF model again
+```{r}
+# Desired number of samples per genre
+samples_per_genre <- 100
+
+# Downsampling the dataset
+set.seed(123)
+updated_class_downsampled_data_100 <- train_data %>%
+  group_by(genre) %>%
+  sample_n(samples_per_genre) %>%
+  ungroup()
+
+updated_class_downsampled_data_100 <- updated_class_downsampled_data_100[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "genre")]
+```
+
+```{r}
+# Fit the Random Forest regression model with downsampled data
+rf_classmodel_downsampled <- randomForest(genre ~ ., data = updated_class_downsampled_data_100, ntree = 500, importance = TRUE)
+
+# Predict on test data
+rf_class_predictions <- predict(rf_classmodel_downsampled, newdata = test_data)
+
+# Confusion matrix
+confusion_matrix_rf <- table(test_data$genre, rf_class_predictions)
+
+# Calculate type 1 and type 2 errors
+type1_errors_rf <- rowSums(confusion_matrix_rf) - diag(confusion_matrix_rf)
+type2_errors_rf <- colSums(confusion_matrix_rf) - diag(confusion_matrix_rf)
+correct_predictions_rf <- diag(confusion_matrix_rf)
+
+# Create confusion table
+confusion_table_rf <- cbind(type1_errors_rf, type2_errors_rf, correct_predictions_rf)
+colnames(confusion_table_rf) <- c("Type 1 Errors", "Type 2 Errors", "Correct Predictions")
+rownames(confusion_table_rf) <- rownames(confusion_matrix_rf)
+
+# Calculate accuracy
+accuracy_rf <- sum(correct_predictions_rf) / sum(confusion_matrix_rf) * 100
+
+# Print confusion table
+print("Confusion Table (Updated Random Forest):")
+print(confusion_table_rf)
+
+# Print accuracy
+print(paste0("Accuracy (Updated Random Forest): ", round(accuracy_rf, 2), "%"))
+```
+After removing the "Explicit" feature, the accuracy ended up even lower (30.23% vs 30.45%)
+
+### Hyperparameter tuning and CV to try and improve model performance 
+(Note: this will take 3-5 minutes even with the reduction of CV from 10-fold to 5-fold and using downsampled data)
+```{r}
+# Set up cross-validation: 5-fold CV
+trainControl <- trainControl(method = "cv", number = 5, savePredictions = "final")
+
+# Define the tuning grid: exploring different values for mtry (number of variables randomly sampled as candidates at each split)
+tuneGrid <- expand.grid(.mtry = c(2, sqrt(ncol(class_downsampled_data_100) - 1), ncol(class_downsampled_data_100)/2))
+
+# Train the model with hyperparameter tuning
+set.seed(123) 
+rf_model_tuned <- train(genre ~ ., data = class_downsampled_data_100,
+                        method = "rf",
+                        trControl = trainControl,
+                        tuneGrid = tuneGrid,
+                        metric = "Accuracy")
+
+print(rf_model_tuned)
+```
+Resampling: Cross-Validated (5 fold) 
+Summary of sample sizes: 9120, 9120, 9120, 9120, 9120 
+Resampling results across tuning parameters:
+
+  mtry      Accuracy   Kappa    
+  2.000000  0.2892105  0.2829204
+  3.316625  0.2919298  0.2856637
+  6.000000  0.2890351  0.2827434
+
+Accuracy was used to select the optimal model using the largest value.
+The final value used for the model was mtry = 3.316625.
+
+With this result, RF would not be a good model for classifying Genres. However, this is likely due to sub-genres sharing similar music attributes. For example, "Black-metal", "Death-metal", "Heavy-metal" may have similar music attributes, where if we were to reduce the number of genres and group these genres together under just "metal", and do the same for other genres such as "Pysch-rock", "Punk-rock", etc grouped under "Rock", the model may potentially perform much better.
+
+## SVM Classification
+
+### Downsampling Data
+
+same logic as before
+
+```{r}
+# Desired number of samples per genre
+samples_per_genre <- 100
+
+# Downsampling the dataset
+set.seed(123)
+class_downsampled_data_100 <- train_data %>%
+  group_by(genre) %>%
+  sample_n(samples_per_genre) %>%
+  ungroup()
+```
+
+### Predictions for SVM
+```{r}
+# Train SVM model
+svm_model <- svm(genre ~ ., data = class_downsampled_data_100, kernel = "radial")
+
+# Predictions
+svm_predictions <- predict(svm_model, newdata = test_data)
+
+# Confusion matrix
+confusion_matrix_svm <- table(test_data$genre, svm_predictions)
+
+# Calculate errors and correct predictions
+type1_errors_svm <- rowSums(confusion_matrix_svm) - diag(confusion_matrix_svm)
+type2_errors_svm <- colSums(confusion_matrix_svm) - diag(confusion_matrix_svm)
+correct_predictions_svm <- diag(confusion_matrix_svm)
+
+# Create confusion table
+confusion_table_svm <- cbind(type1_errors_svm, type2_errors_svm, correct_predictions_svm)
+colnames(confusion_table_svm) <- c("Type 1 Errors", "Type 2 Errors", "Correct Predictions")
+rownames(confusion_table_svm) <- rownames(confusion_matrix_svm)
+
+# Calculate accuracy
+accuracy_svm <- sum(correct_predictions_svm) / sum(confusion_matrix_svm) * 100
+
+# Print confusion table
+print("Confusion Table (SVM):")
+print(confusion_table_svm)
+
+# Print accuracy
+print(paste0("Accuracy (SVM): ", round(accuracy_svm, 2), "%"))
+```
+
+```{r}
+total_type1_errors_svm <- sum(confusion_table_svm[, 1])
+total_type2_errors_svm <- sum(confusion_table_svm[, 2])
+total_correct_predictions_svm <- sum(confusion_table_svm[, 3])
+
+print(paste0("Total Type 1 Errors: ", total_type1_errors_svm))
+print(paste0("Total Type 2 Errors: ", total_type2_errors_svm))
+print(paste0("Total Correct Predictions: ", total_correct_predictions_svm))
+```
+
+
+## Naive Bayes Classification
+
+### Naive Bayes Data Prep
+```{r}
+class_data <- data[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "genre", "explicit")]
+
+class_features <- c("popularity","duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo") 
+
+# Standardise data
+std_class_data <- copy(class_data)
+std_class_data[, (class_features) := lapply(.SD, scale), .SDcols = class_features] 
+
+# Train and test split
+set.seed(123)  
+train <- sample.split(Y = std_class_data$genre, SplitRatio = 0.7)
+train_data <- subset(std_class_data, train == T)
+test_data <- subset(std_class_data, train == F) 
+train_data$genre <- as.factor(train_data$genre)
+test_data$genre <- as.factor(test_data$genre)
+```
+
+### Naive Bayes Prediction
+```{r}
+# Train the Naive Bayes model
+nb_model <- naive_bayes(as.factor(genre) ~ ., data = train_data, laplace = 1)
+
+# Predict on test data
+nb_predictions <- predict(nb_model, newdata = test_data, type = "class")
+
+# Confusion matrix
+confusion_matrix_nb <- table(test_data$genre, nb_predictions)
+
+# Calculate errors and correct predictions
+type1_errors_nb <- rowSums(confusion_matrix_nb) - diag(confusion_matrix_nb)
+type2_errors_nb <- colSums(confusion_matrix_nb) - diag(confusion_matrix_nb)
+correct_predictions_nb <- diag(confusion_matrix_nb)
+
+# Create confusion table
+confusion_table_nb <- cbind(type1_errors_nb, type2_errors_nb, correct_predictions_nb)
+colnames(confusion_table_nb) <- c("Type 1 Errors", "Type 2 Errors", "Correct Predictions")
+rownames(confusion_table_nb) <- rownames(confusion_matrix_nb)
+
+# Calculate accuracy
+accuracy_nb <- sum(correct_predictions_nb) / sum(confusion_matrix_nb) * 100
+
+# Print confusion table
+print("Confusion Table (Naive Bayes):")
+print(confusion_table_nb)
+
+# Print accuracy
+print(paste0("Accuracy (Naive Bayes): ", round(accuracy_nb, 2), "%"))
+```
+```{r}
+total_type1_errors_nb <- sum(confusion_table_nb[, 1])
+total_type2_errors_nb <- sum(confusion_table_nb[, 2])
+total_correct_predictions_nb <- sum(confusion_table_nb[, 3])
+
+print(paste0("Total Type 1 Errors: ", total_type1_errors_nb))
+print(paste0("Total Type 2 Errors: ", total_type2_errors_nb))
+print(paste0("Total Correct Predictions: ", total_correct_predictions_nb))
+```
+
+
+### Naive Bayes CV
+
+```{r}
+train_control <- trainControl(method = "cv", number = 10, summaryFunction = defaultSummary)
+set.seed(123)
+nb_cv_model <- train(as.factor(genre) ~ ., data = train_data, method = "naive_bayes",
+                     trControl = train_control, tuneLength = 5)
+```
+
+### Predict with updated Naive Bayes Model
+```{r}
+# Predict on test data with the improved model
+nb_predictions_updated <- predict(nb_cv_model, newdata = test_data, type = "raw")
+
+# Recalculate the confusion matrix and accuracy
+confusion_matrix_nb_updated <- table(test_data$genre, nb_predictions_updated)
+accuracy_nb_updated <- sum(diag(confusion_matrix_nb_updated)) / sum(confusion_matrix_nb_updated) * 100
+
+# Print the updated model accuracy
+print(paste0("Updated Accuracy (Naive Bayes): ", round(accuracy_nb_updated, 2), "%"))
+```
+After using cross-validation for the Naive Bayes model, we get an even poorer accuracy. 
+
+## XGBoost
+
+### XGB Data Prep
+```{r}
+class_data <- data[, c("popularity", "duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "genre", "explicit")]
+
+class_features <- c("popularity","duration_ms", "danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo") 
+
+# Convert 'genre' into a factor if it's not already
+class_data$genre <- as.factor(class_data$genre)
+
+# Standardizing the data
+class_data_scaled <- scale(class_data[, ..class_features])
+class_data_scaled <- as.data.frame(class_data_scaled)
+class_data_scaled$genre <- class_data$genre  # Add 'genre' back as a factor for classification
+
+# Split the data into training and testing sets
+set.seed(123)
+split <- sample.split(class_data_scaled$genre, SplitRatio = 0.7)
+train_data <- subset(class_data_scaled, split == TRUE)
+test_data <- subset(class_data_scaled, split == FALSE)
+```
+
+### XGBoost model train and predictions
+(Note: This will take ~5 minutes to train the XGBoost model)
+```{r}
+# Assuming train_data and test_data are prepared and genre is factorized
+train_matrix <- xgb.DMatrix(data.matrix(train_data[, -which(names(train_data) == "genre")]), label = as.numeric(train_data$genre) - 1)
+test_matrix <- xgb.DMatrix(data.matrix(test_data[, -which(names(test_data) == "genre")]))
+
+# Train the XGBoost model
+num_class <- length(levels(train_data$genre))
+xgb_params <- list(objective = "multi:softprob", num_class = num_class, eval_metric = "mlogloss")
+xgb_model <- xgboost(params = xgb_params, data = train_matrix, nrounds = 20, nthread = 1)
+
+# Predictions
+xgb_predictions <- predict(xgb_model, test_matrix)
+xgb_predictions <- matrix(xgb_predictions, ncol = num_class, byrow = TRUE)
+predicted_labels <- max.col(xgb_predictions) - 1
+
+# Convert numeric predictions back to factor labels
+predicted_genres <- levels(train_data$genre)[predicted_labels + 1]
+
+# Evaluation
+confusion_matrix_xgb <- table(Predicted = predicted_genres, Actual = test_data$genre)
+accuracy_xgb <- sum(diag(confusion_matrix_xgb)) / sum(confusion_matrix_xgb) * 100
+
+# Calculate errors and correct predictions
+type1_errors_xgb <- rowSums(confusion_matrix_xgb) - diag(confusion_matrix_xgb)
+type2_errors_xgb <- colSums(confusion_matrix_xgb) - diag(confusion_matrix_xgb)
+correct_predictions_xgb <- diag(confusion_matrix_xgb)
+
+# Create confusion table
+confusion_table_xgb <- cbind(type1_errors_xgb, type2_errors_xgb, correct_predictions_xgb)
+colnames(confusion_table_xgb) <- c("Type 1 Errors", "Type 2 Errors", "Correct Predictions")
+rownames(confusion_table_xgb) <- rownames(confusion_matrix_xgb)
+
+print(paste0("Accuracy (XGBoost): ", round(accuracy_xgb, 2), "%"))
+```
+
+```{r}
+total_type1_errors_xgb <- sum(confusion_table_xgb[, 1])
+total_type2_errors_xgb <- sum(confusion_table_xgb[, 2])
+total_correct_predictions_xgb <- sum(confusion_table_xgb[, 3])
+
+print(paste0("Total Type 1 Errors: ", total_type1_errors_xgb))
+print(paste0("Total Type 2 Errors: ", total_type2_errors_xgb))
+print(paste0("Total Correct Predictions: ", total_correct_predictions_xgb))
+```
+
+
+Having tested with different options, the best balance between computational time and end result is using the full train_data set with nrounds = 20
+
+Below are the three scenarios tested:
+
+No. 1. With train_data and nrounds = 100: [1] "Accuracy (XGBoost): 30.99%"
+No. 2. With sample_data and nrounds = 20: [1] "Accuracy (XGBoost): 27.07%"
+No. 3. With train_data and nrounds = 20: [1] "Accuracy (XGBoost): 30.33%"
+
+Therefore, the code used will be Scenario 3.
+
+# END of project
